@@ -3,17 +3,25 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "next-themes";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { Layout } from "./components/Layout";
+import { lazy, Suspense } from "react";
 import Index from "./pages/Index";
-import Dashboard from "./pages/Dashboard";
-import AITrainer from "./pages/AITrainer";
-import ExerciseGuide from "./pages/ExerciseGuide";
-import WorkoutTracker from "./pages/WorkoutTracker";
-import NutritionTracker from "./pages/NutritionTracker";
-import HealthMonitoring from "./pages/HealthMonitoring";
-import Login from "./pages/Login";
-import Signup from "./pages/Signup";
-import Profile from "./pages/Profile";
-import NotFound from "./pages/NotFound";
+
+// Route-level code splitting: each page (and heavy deps like MediaPipe and
+// Recharts) downloads only when the route is first visited.
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const AITrainer = lazy(() => import("./pages/AITrainer"));
+const ExerciseGuide = lazy(() => import("./pages/ExerciseGuide"));
+const WorkoutTracker = lazy(() => import("./pages/WorkoutTracker"));
+const NutritionTracker = lazy(() => import("./pages/NutritionTracker"));
+const HealthMonitoring = lazy(() => import("./pages/HealthMonitoring"));
+const Login = lazy(() => import("./pages/Login"));
+const Signup = lazy(() => import("./pages/Signup"));
+const Profile = lazy(() => import("./pages/Profile"));
+const NotFound = lazy(() => import("./pages/NotFound"));
+
+const PageFallback = () => (
+  <div role="status" className="min-h-[50vh] flex items-center justify-center text-muted-foreground">Loading...</div>
+);
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -35,6 +43,7 @@ const App = () => (
     <BrowserRouter>
       <AuthProvider>
         <Layout>
+          <Suspense fallback={<PageFallback />}>
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
@@ -49,6 +58,7 @@ const App = () => (
             <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
+          </Suspense>
         </Layout>
       </AuthProvider>
     </BrowserRouter>

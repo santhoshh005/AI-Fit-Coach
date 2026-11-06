@@ -64,20 +64,26 @@ vi.mock("framer-motion", () => ({
 }));
 
 // Mock Auth Context
-vi.mock("@/contexts/AuthContext", () => ({
-  useAuth: () => ({
+// Mocks return stable references, like the real React-state-backed hooks.
+// Fresh objects on every call would re-trigger the pages' data-sync effects
+// forever (effect -> setState -> render -> new object -> effect).
+vi.mock("@/contexts/AuthContext", () => {
+  const auth = {
     user: { uid: "test-uid", email: "test@example.com", displayName: "Test User" },
     loading: false,
     login: vi.fn(),
     signup: vi.fn(),
     logout: vi.fn(),
-  }),
-  AuthProvider: ({ children }: any) => <>{children}</>,
-}));
+  };
+  return {
+    useAuth: () => auth,
+    AuthProvider: ({ children }: any) => <>{children}</>,
+  };
+});
 
 // Mock Firestore hooks
-vi.mock("@/hooks/useFirestore", () => ({
-  useUserProfile: () => ({
+vi.mock("@/hooks/useFirestore", () => {
+  const profileResult = {
     profile: {
       name: "Test User",
       email: "test@example.com",
@@ -89,8 +95,8 @@ vi.mock("@/hooks/useFirestore", () => ({
       activity_level: "active",
     },
     loading: false,
-  }),
-  useGoals: () => ({
+  };
+  const goalsResult = {
     data: [
       {
         id: "goal-1",
@@ -101,35 +107,38 @@ vi.mock("@/hooks/useFirestore", () => ({
       },
     ],
     loading: false,
-  }),
-  useFirestoreCollection: (collectionName: string) => {
-    if (collectionName === "workouts") {
-      return {
-        data: [
-          { id: "w-1", exercise_name: "Squat", sets: 3, reps: 10, duration_minutes: 15, calories_burned: 150, timestamp: "2026-06-16T12:00:00Z" },
-        ],
-        loading: false,
-      };
-    }
-    if (collectionName === "nutrition") {
-      return {
-        data: [
-          { id: "n-1", food_name: "Oats", calories: 300, protein_g: 10, carbs_g: 50, fats_g: 5, date: "2026-06-16T12:00:00Z", meal_type: "breakfast" },
-        ],
-        loading: false,
-      };
-    }
-    return { data: [], loading: false };
-  },
-  useBodyMetrics: () => ({
+  };
+  const collections: Record<string, { data: unknown[]; loading: boolean }> = {
+    workouts: {
+      data: [
+        { id: "w-1", exercise_name: "Squat", sets: 3, reps: 10, duration_minutes: 15, calories_burned: 150, timestamp: "2026-06-16T12:00:00Z" },
+      ],
+      loading: false,
+    },
+    nutrition: {
+      data: [
+        // Logged "today" so the tracker's today-only list shows it regardless of when tests run.
+        { id: "n-1", food_name: "Oats", calories: 300, protein_g: 10, carbs_g: 50, fats_g: 5, date: new Date().toISOString(), meal_type: "breakfast" },
+      ],
+      loading: false,
+    },
+  };
+  const emptyCollection = { data: [], loading: false };
+  const bodyMetricsResult = {
     data: [
       { id: "bm-1", recorded_at: "2026-06-16T12:00:00Z", weight_kg: 80, body_fat_percentage: 15, muscle_mass_kg: 40 },
     ],
     loading: false,
-  }),
-  addFirestoreDoc: mockAddFirestoreDoc,
-  deleteFirestoreDoc: mockDeleteFirestoreDoc,
-}));
+  };
+  return {
+    useUserProfile: () => profileResult,
+    useGoals: () => goalsResult,
+    useFirestoreCollection: (collectionName: string) => collections[collectionName] ?? emptyCollection,
+    useBodyMetrics: () => bodyMetricsResult,
+    addFirestoreDoc: mockAddFirestoreDoc,
+    deleteFirestoreDoc: mockDeleteFirestoreDoc,
+  };
+});
 
 // Mock Pose Detection Hook
 vi.mock("@/hooks/usePoseDetection", () => ({
@@ -139,6 +148,10 @@ vi.mock("@/hooks/usePoseDetection", () => ({
     cameraOn: false,
     errorMessage: null,
     reps: 0,
+    repHistory: [],
+    partialReps: 0,
+    repSummary: { avgScore: 0, bestScore: 0, avgTempoSeconds: 0, consistency: 0 },
+    sessionFormScore: 0,
     postureScore: 0,
     calories: 0,
     feedbackHistory: [],
@@ -251,9 +264,10 @@ describe("FitCoach Virtual Trainer - Feature Verification", () => {
     );
 
     // Verify exercise options are rendered
-    expect(screen.getByText("Squat")).toBeInTheDocument();
-    expect(screen.getByText("Biceps Curl")).toBeInTheDocument();
-    expect(screen.getByText("Pushup")).toBeInTheDocument();
+    // Exercise names also appear in the "Current Exercise" label, so target the selector buttons.
+    expect(screen.getByRole("button", { name: "Squat" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Biceps Curl" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pushup" })).toBeInTheDocument();
 
     // Verify Flip Camera button is rendered
     const flipButton = screen.getByRole("button", { name: /flip camera/i });
@@ -297,7 +311,7 @@ describe("FitCoach Virtual Trainer - Feature Verification", () => {
 
     // Verify layout headers
     expect(screen.getByText("Workout Tracker")).toBeInTheDocument();
-    expect(screen.getByText("Log a Workout")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /log workout/i })).toBeInTheDocument();
 
     // Verify existing list items render correctly
     expect(screen.getByText("Squat")).toBeInTheDocument();
@@ -313,7 +327,7 @@ describe("FitCoach Virtual Trainer - Feature Verification", () => {
     // Verify headers and logged items
     expect(screen.getByText("Nutrition Tracker")).toBeInTheDocument();
     expect(screen.getByText("Oats")).toBeInTheDocument();
-    expect(screen.getByText("300 kcal")).toBeInTheDocument();
+    expect(screen.getByText(/^300 kcal/)).toBeInTheDocument();
   });
 
   it("7. Health & Analytics: Tab toggle and metrics render correctly", () => {
@@ -328,15 +342,17 @@ describe("FitCoach Virtual Trainer - Feature Verification", () => {
     expect(screen.getByRole("tab", { name: /progress analytics/i })).toBeInTheDocument();
 
     // Verify metric cards
-    expect(screen.getByText("Body Mass Index")).toBeInTheDocument();
-    expect(screen.getByText("Calorie Requirement (TDEE)")).toBeInTheDocument();
-    expect(screen.getByText("Body Fat Percentage")).toBeInTheDocument();
+    expect(screen.getByText("BMI")).toBeInTheDocument();
+    expect(screen.getByText("Daily Calorie Need")).toBeInTheDocument();
+    expect(screen.getByText("Body Fat")).toBeInTheDocument();
 
-    // Switch tabs
+    // Switch tabs (Radix Tabs activates on mouse down, not click)
     const analyticsTab = screen.getByRole("tab", { name: /progress analytics/i });
-    fireEvent.click(analyticsTab);
+    fireEvent.mouseDown(analyticsTab);
 
-    // Verify analytics components load
-    expect(screen.getByText("Weight Timeline")).toBeInTheDocument();
+    // Verify analytics components load, including the AI Trainer insights
+    expect(screen.getByText("Weight Change Timeline")).toBeInTheDocument();
+    expect(screen.getByText("AI Form Score Trend")).toBeInTheDocument();
+    expect(screen.getByText("AI Reps by Exercise")).toBeInTheDocument();
   });
 });

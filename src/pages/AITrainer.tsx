@@ -13,7 +13,7 @@ import jackImg from "@/assets/exercise-jumping-jack.png";
 import plankImg from "@/assets/exercise-plank.png";
 import { usePoseDetection, type ExerciseType } from "@/hooks/usePoseDetection";
 import { useAuth } from "@/contexts/AuthContext";
-import { addFirestoreDoc } from "@/hooks/useFirestore";
+import { addFirestoreDoc, useUserProfile } from "@/hooks/useFirestore";
 import { useToast } from "@/hooks/use-toast";
 import { serverTimestamp } from "firebase/firestore";
 
@@ -39,7 +39,7 @@ const exerciseGuidance: Record<
     aiExpectations: [
       "Knee angle reaches squat depth and returns to near standing.",
       "Back stays stable and knees track over ankles.",
-      "Rep counts only if posture score is 75% or higher.",
+      "Each counted rep gets a form score; 75%+ is good form.",
     ],
   },
   Pushup: {
@@ -53,7 +53,7 @@ const exerciseGuidance: Record<
     aiExpectations: [
       "Elbow angle goes down and returns to full extension.",
       "Body remains in a straight line during each rep.",
-      "Rep counts only if posture score is 75% or higher.",
+      "Each counted rep gets a form score; 75%+ is good form.",
     ],
   },
   "Biceps Curl": {
@@ -67,7 +67,7 @@ const exerciseGuidance: Record<
     aiExpectations: [
       "Elbow flexes to top position and returns to extension.",
       "Elbows stay tucked; full range is required.",
-      "Rep counts only if posture score is 75% or higher.",
+      "Each counted rep gets a form score; 75%+ is good form.",
     ],
   },
   Lunge: {
@@ -81,7 +81,7 @@ const exerciseGuidance: Record<
     aiExpectations: [
       "Lunge knee reaches depth and returns to standing.",
       "Torso remains upright and movement stays balanced.",
-      "Rep counts only if posture score is 75% or higher.",
+      "Each counted rep gets a form score; 75%+ is good form.",
     ],
   },
   "Jumping Jack": {
@@ -95,7 +95,7 @@ const exerciseGuidance: Record<
     aiExpectations: [
       "Arms and feet open enough, then close fully.",
       "Body control and range must be consistent.",
-      "Rep counts only if posture score is 75% or higher.",
+      "Each counted rep gets a form score; 75%+ is good form.",
     ],
   },
   Plank: {
@@ -147,12 +147,19 @@ export default function AITrainer() {
     setHasProcessedState(true);
   }, [location.state, hasProcessedState]);
 
+  const { profile } = useUserProfile();
+  const bodyWeightKg = Number(profile?.weight_kg) || undefined;
+
   const {
     videoRef,
     canvasRef,
     cameraOn,
     errorMessage,
     reps,
+    repHistory,
+    partialReps,
+    repSummary,
+    sessionFormScore,
     postureScore,
     calories,
     feedbackHistory,
@@ -172,7 +179,7 @@ export default function AITrainer() {
     resetSession,
     facingMode,
     toggleCameraFacing,
-  } = usePoseDetection(selectedExercise);
+  } = usePoseDetection(selectedExercise, { bodyWeightKg });
 
   const startCameraRef = useRef(startCamera);
   useEffect(() => {
@@ -214,10 +221,10 @@ export default function AITrainer() {
   const completedSets = useMemo(() => {
     if (isPlank) {
       if (targetPlankTime <= 0) return 0;
-      return Math.min(targetSets, Math.floor(elapsedSeconds / targetPlankTime));
+      return Math.min(targetSets, Math.floor(activePlankTime / targetPlankTime));
     }
     return Math.min(targetSets, Math.floor(reps / targetReps));
-  }, [elapsedSeconds, isPlank, reps, targetPlankTime, targetReps, targetSets]);
+  }, [activePlankTime, isPlank, reps, targetPlankTime, targetReps, targetSets]);
 
   const currentSetReps = useMemo(() => {
     if (isPlank) {
@@ -237,11 +244,11 @@ export default function AITrainer() {
     if (isPlank) {
       const totalTargetSeconds = targetPlankTime * targetSets;
       if (totalTargetSeconds <= 0) return 0;
-      return Math.min(100, (elapsedSeconds / totalTargetSeconds) * 100);
+      return Math.min(100, (activePlankTime / totalTargetSeconds) * 100);
     }
     if (targetTotalReps <= 0) return 0;
     return Math.min(100, (reps / targetTotalReps) * 100);
-  }, [elapsedSeconds, isPlank, reps, targetPlankTime, targetSets, targetTotalReps]);
+  }, [activePlankTime, isPlank, reps, targetPlankTime, targetSets, targetTotalReps]);
 
   useEffect(() => {
     if (selectedExercise === "Plank") {
@@ -299,6 +306,7 @@ export default function AITrainer() {
         good_plank_seconds: Number(activePlankTime.toFixed(1)),
         active_plank_seconds: Number(activePlankTime.toFixed(1)),
         perfect_plank_seconds: Number(perfectPlankTime.toFixed(1)),
+        avg_form_score: sessionFormScore,
         timestamp: serverTimestamp(),
       });
 
@@ -330,6 +338,7 @@ export default function AITrainer() {
     targetPlankTime,
     activePlankTime,
     perfectPlankTime,
+    sessionFormScore,
     toast,
   ]);
 
@@ -341,10 +350,7 @@ export default function AITrainer() {
       return;
     }
 
-    const durationSeconds = Math.max(
-      0,
-      isPlank ? elapsedSeconds : elapsedSeconds
-    );
+    const durationSeconds = Math.max(0, elapsedSeconds);
 
     const hasCompletedSession =
       (isPlank && (plankCompleted || activePlankTime > 0.5)) ||
@@ -357,11 +363,18 @@ export default function AITrainer() {
     const saveAnalysis = async () => {
       try {
         const feedback =
-          postureScore >= 85 ? "excellent" : postureScore >= 65 ? "good" : "needs_improvement";
+          sessionFormScore >= 85 ? "excellent" : sessionFormScore >= 65 ? "good" : "needs_improvement";
         await addFirestoreDoc("ai_workout_analysis", user.uid, {
           exercise_name: selectedExercise.toLowerCase().replace(/ /g, "_"),
           reps_detected: isPlank ? 0 : reps,
-          posture_score: postureScore,
+          // Session average, not the last frame's posture.
+          posture_score: sessionFormScore,
+          avg_rep_score: isPlank ? null : repSummary.avgScore,
+          best_rep_score: isPlank ? null : repSummary.bestScore,
+          partial_reps: isPlank ? 0 : partialReps,
+          avg_rep_seconds: isPlank ? null : repSummary.avgTempoSeconds,
+          tempo_consistency: isPlank ? null : repSummary.consistency,
+          rep_scores: isPlank ? [] : repHistory.map((r) => r.score),
           calories_estimated: calories,
           duration_seconds: durationSeconds,
           good_plank_seconds: Number(activePlankTime.toFixed(1)),
@@ -394,7 +407,10 @@ export default function AITrainer() {
     isPlank,
     plankCompleted,
     perfectPlankTime,
-    postureScore,
+    sessionFormScore,
+    repSummary,
+    partialReps,
+    repHistory,
     reps,
     selectedExercise,
     toast,
@@ -501,7 +517,7 @@ export default function AITrainer() {
                     </p>
                     {errorMessage && <p className="text-sm text-destructive px-6">{errorMessage}</p>}
                     {errorMessage && (
-                      <Button size="sm" onClick={startCamera} className="bg-gradient-primary text-primary-foreground">
+                      <Button size="sm" onClick={() => void startCamera()} className="bg-gradient-primary text-primary-foreground">
                         Retry Camera
                       </Button>
                     )}
@@ -548,9 +564,9 @@ export default function AITrainer() {
                 <div className="bg-card rounded-xl border p-2 sm:p-4 shadow-card text-center">
                   <p className="text-xs sm:text-sm text-muted-foreground mb-1">Plank Timer</p>
                   <p className="text-lg sm:text-2xl font-display font-bold text-primary">
-                    {elapsedSeconds}s / {targetPlankTime}s
+                    {Math.floor(activePlankTime)}s / {targetPlankTime}s
                   </p>
-                  <p className="text-[9px] sm:text-[11px] leading-tight text-muted-foreground mt-1">Good: {activePlankTime.toFixed(1)}s | Perfect: {perfectPlankTime.toFixed(1)}s</p>
+                  <p className="text-[9px] sm:text-[11px] leading-tight text-muted-foreground mt-1">Good form: {activePlankTime.toFixed(1)}s | Perfect: {perfectPlankTime.toFixed(1)}s | Session: {formatTime(elapsedSeconds)}</p>
                   {perfectPlankTimeAtTarget > 0 && (
                     <p className="text-[9px] sm:text-[11px] leading-tight text-emerald-300 mt-1">Perfect Recorded @ Target: {perfectPlankTimeAtTarget.toFixed(1)}s</p>
                   )}
@@ -575,8 +591,9 @@ export default function AITrainer() {
                   <p className="text-xl sm:text-3xl font-display font-bold text-primary">{reps}</p>
                 </div>
                 <div className="bg-card rounded-xl border p-2 sm:p-4 shadow-card text-center">
-                  <p className="text-xs sm:text-sm text-muted-foreground mb-1">Posture Score</p>
-                  <p className="text-xl sm:text-3xl font-display font-bold">{postureScore}%</p>
+                  <p className="text-xs sm:text-sm text-muted-foreground mb-1">Avg Rep Form</p>
+                  <p className="text-xl sm:text-3xl font-display font-bold">{repHistory.length > 0 ? `${repSummary.avgScore}%` : "--"}</p>
+                  <p className="text-[9px] sm:text-[11px] leading-tight text-muted-foreground mt-1">Live posture: {postureScore}%</p>
                 </div>
                 <div className="bg-card rounded-xl border p-2 sm:p-4 shadow-card text-center">
                   <p className="text-xs sm:text-sm text-muted-foreground mb-1">Calories</p>
@@ -585,6 +602,36 @@ export default function AITrainer() {
               </>
             )}
           </div>
+
+          {!isPlank && (
+            <div className="bg-card rounded-xl border p-4 shadow-card">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <p className="font-medium">Rep Quality</p>
+                <p className="text-xs text-muted-foreground">
+                  {repHistory.length > 0
+                    ? `Best ${repSummary.bestScore}% | Tempo ${repSummary.avgTempoSeconds}s/rep | Consistency ${repSummary.consistency}%`
+                    : "Complete a full rep to see its score"}
+                  {partialReps > 0 ? ` | Partial (not counted): ${partialReps}` : ""}
+                </p>
+              </div>
+              {repHistory.length > 0 ? (
+                <div className="flex items-end gap-1 h-16" role="img" aria-label={`Form scores for the last ${Math.min(repHistory.length, 30)} reps`}>
+                  {repHistory.slice(-30).map((rep) => (
+                    <div
+                      key={rep.index}
+                      title={`Rep ${rep.index}: ${rep.score}% in ${(rep.durationMs / 1000).toFixed(1)}s`}
+                      className={`flex-1 min-w-[4px] max-w-[18px] rounded-t ${rep.score >= 85 ? "bg-emerald-500" : rep.score >= 65 ? "bg-primary" : "bg-amber-500"}`}
+                      style={{ height: `${Math.max(8, rep.score)}%` }}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="h-16 flex items-center justify-center text-xs text-muted-foreground border border-dashed rounded-lg">
+                  Each rep's form score will appear here.
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="bg-card rounded-xl border p-4 shadow-card space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -789,7 +836,7 @@ export default function AITrainer() {
                 <p className="text-xs text-muted-foreground mb-3">
                   {isPlank
                     ? "The timer progresses only while posture is valid."
-                    : "The rep is counted only if these conditions are satisfied."}
+                    : "A rep counts only after a full range of motion: leave the start position, reach full depth, and return. Partial reps are flagged, not counted."}
                 </p>
                 <ul className="space-y-1.5 text-sm text-muted-foreground mb-3">
                   {selectedGuidance.aiExpectations.map((rule, idx) => (
@@ -797,7 +844,7 @@ export default function AITrainer() {
                   ))}
                 </ul>
                 <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-                  Accuracy tiers: 95-100 = Perfect, 80-94 = Good move, 75-79 = Counted with correction, below 75 = Not counted.
+                  Form score per rep: 90-100 = Excellent, 75-89 = Good, below 75 = Counted with a correction tip.
                 </div>
 
                 <div className="mt-4 rounded-xl border bg-secondary/30 p-3">
